@@ -11,5 +11,5 @@ setuptools.setup(
     long_description_content_type="text/markdown",
     url='https://github.com/Vrajesh-Vaghasiya/fastapi-sqlAlchemy',
     packages=['middleware'],
-    install_requires=['SQLAlchemy==2.0.36', 'fastapi==0.115.6', 'fastapi-pagination==0.12.32'],
+    install_requires=['SQLAlchemy', 'fastapi', 'fastapi-pagination'],
 )
