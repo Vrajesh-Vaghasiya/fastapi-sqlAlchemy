@@ -2,20 +2,19 @@ import logging
 from functools import reduce
 from typing import Any, Dict, Generic, List, Optional, Type, TypeVar, Union
 
-from sqlalchemy.orm import Query
-from sqlalchemy.sql.expression import nulls_last
 from fastapi import HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi_pagination.ext.sqlalchemy import paginate
 from pydantic import BaseModel
 from sqlalchemy import select, delete, desc, func, Select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Query
+from sqlalchemy.orm import Session
+from sqlalchemy.sql.expression import nulls_last
 from starlette import status
 
-# from db.base import Base
-import errors
-from exceptions import BaseHTTPException
+import fastapi_sqlalchemy.errors as errors
+from fastapi_sqlalchemy.exceptions import BaseHTTPException
 
 ModelType = TypeVar("ModelType", bound=BaseModel)
 CreateSchemaType = TypeVar("CreateSchemaType", bound=BaseModel)
@@ -39,7 +38,7 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         )
         self.id = "id"
 
-    async def _active_data(self, query):
+    def _active_data(self, query):
         return query.filter(
             getattr(self.model, "is_active") == True,
             getattr(self.model, "is_deleted") == False
@@ -60,7 +59,7 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         "not_in": lambda value: ("not_in", value),
     }
 
-    async def filter_test(self, query: Union[Query, Select], **kwargs):
+    def filter_test(self, query: Union[Query, Select], **kwargs):
         search_filters = []
         for field_name, value in kwargs.items():
             operator = "__eq__"
@@ -95,15 +94,15 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
                 else:
                     model_field = getattr(self.model, field_name)
                     query = query.filter(getattr(model_field, operator)(value))
-        # for field_name, value in kwargs.items():
-        #     if hasattr(self.model, field_name) and value:
-        #         if "__" in field_name:
-        #             field_name, operator = field_name.split("__")
-        #             operator, value = self._orm_operator_transformer[operator](value)
-        #         else:
-        #             operator = "__eq__"
-        #         model_field = getattr(self.model, field_name)
-        #         query = query.filter(getattr(model_field, operator)(value))
+        for field_name, value in kwargs.items():
+            if hasattr(self.model, field_name) and value:
+                if "__" in field_name:
+                    field_name, operator = field_name.split("__")
+                    operator, value = self._orm_operator_transformer[operator](value)
+                else:
+                    operator = "__eq__"
+                model_field = getattr(self.model, field_name)
+                query = query.filter(getattr(model_field, operator)(value))
         return query
 
     _orm_operator_transformer = {
@@ -121,19 +120,7 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         "not_in": lambda value: ("not_in", value),
     }
 
-    async def filter_test(self, query: Union[Query, Select], **kwargs):
-        for field_name, value in kwargs.items():
-            if hasattr(self.model, field_name) and value:
-                if "__" in field_name:
-                    field_name, operator = field_name.split("__")
-                    operator, value = self._orm_operator_transformer[operator](value)
-                else:
-                    operator = "__eq__"
-                model_field = getattr(self.model, field_name)
-                query = query.filter(getattr(model_field, operator)(value))
-        return query
-
-    async def is_exist(self, db: AsyncSession, **kwargs) -> Optional[ModelType]:
+    def is_exist(self, db: Session, **kwargs) -> Optional[ModelType]:
         query = select(self.model)
         for key, value in kwargs.items():
             if hasattr(self.model, key):
@@ -141,7 +128,7 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
                     query = query.filter(getattr(self.model, key) != value)
                 else:
                     query = query.filter(getattr(self.model, key) == value)
-        query = await db.execute(query)
+        query = db.execute(query)
         exists = query.scalars().first()
         if exists:
             raise BaseHTTPException(
@@ -151,34 +138,17 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
             )
         return True
 
-    async def get(
-            self, db: AsyncSession, id: int, raise_exc=True, **kwargs
-    ) -> Optional[ModelType]:
-        logger.debug(
-            f"Reading from %s, id: %s", self.model.__name__, id
-        )
-        query = (await self._active_data(select(self.model))).filter(
-            getattr(self.model, self.id) == id
-        )
-        query = await db.execute(query)
-        result = query.scalars().first()
-        if not result:
-            if raise_exc:
-                raise BaseHTTPException(
-                    detail=f"{self.model_name.replace('_', ' ')} not found",
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    error_code=getattr(errors, f"NOT_FOUND")
-                )
-        return result
+    def get(self, db: Session, id: Any) -> Optional[ModelType]:
+        return db.query(self.model).filter(self.model.id == id).first()
 
-    async def filter_by(
-            self, db: AsyncSession, is_reversed=False, raise_exc=True, join_tables: list = [],
+    def filter_by(
+            self, db: Session, is_reversed=False, raise_exc=True, join_tables: list = [],
             is_outer: bool = False, **kwargs
     ) -> Optional[ModelType]:
         logger.debug(
             f"Reading from %s, kwargs: %s", self.model.__name__, kwargs
         )
-        query = await self._active_data(select(self.model))
+        query = self._active_data(select(self.model))
         for join_table in join_tables:
             query = query.join(join_table, isouter=is_outer)
         for key, value in kwargs.items():
@@ -197,7 +167,7 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
             query = query.order_by(
                 nulls_last(desc(order_by) if direction == "desc" else order_by)
             )
-        query = await db.execute(query)
+        query = db.execute(query)
         result = query.scalars().first()
         if not result:
             if raise_exc:
@@ -208,9 +178,10 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
                 )
         return result
 
-    async def get_multi(
+    def get_multi(
             self,
-            db: AsyncSession, *,
+            db: Session,
+            *,
             filter_data=None,
             sorting: bool = True,
             filters: bool = True,
@@ -220,7 +191,7 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
             **kwargs
     ) -> List[ModelType]:
         logger.debug(f"Reading data from {self.model.__name__}")
-        query = await self._active_data(select(self.model))
+        query = self._active_data(select(self.model))
         for join_table in join_tables:
             query = query.join(join_table, isouter=is_outer)
         for key, value in kwargs.items():
@@ -245,29 +216,27 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
             query = query.order_by(desc(getattr(self.model, "id")))
         logger.debug('Query string: %s', query)
         if pagination:
-            results = await paginate(db, query)
+            results = paginate(db, query)
         else:
-            query = await db.execute(query)
+            query = db.execute(query)
             results = query.unique().scalars().all()
         return results
+        # return db.query(self.model).offset(skip).limit(limit).all()
 
-    async def create(
-            self, db: AsyncSession, *,
-            obj_in: Union[Dict[str, Any], CreateSchemaType],
-            autocommit: bool = True,
-    ) -> ModelType:
-        # obj_in_data = jsonable_encoder(obj_in)
+    def create(self, db: Session, *, obj_in: CreateSchemaType,
+            autocommit: bool = True,) -> ModelType:
         logger.info(f'Creating {self.model.__name__} with kwargs: {obj_in}')
         try:
+            obj_in = jsonable_encoder(obj_in)
             db_obj = self.model(**obj_in)
             db.add(db_obj)
             if autocommit:
-                await db.commit()
-                await db.refresh(db_obj)
+                db.commit()
+                db.refresh(db_obj)
             else:
-                await db.flush()
+                db.flush()
         except IntegrityError as ex:
-            await db.rollback()
+            db.rollback()
             logger.exception(ex.orig.args)
             raise HTTPException(
                 detail=str(ex.orig),
@@ -276,14 +245,15 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         logger.info(f'{self.model.__name__} created, data: {db_obj.__dict__}')
         return db_obj
 
-    async def update(
+    def update(
             self,
-            db: AsyncSession,
+            db: Session,
             *,
             db_obj: ModelType,
             obj_in: Union[UpdateSchemaType, Dict[str, Any]],
             autocommit: bool = True
     ) -> ModelType:
+
         obj_data = jsonable_encoder(db_obj)
         logger.debug(f"Updating {self.model.__name__} with '{obj_in}' data")
         try:
@@ -296,12 +266,12 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
                     setattr(db_obj, field, update_data[field])
             db.add(db_obj)
             if autocommit:
-                await db.commit()
-                await db.refresh(db_obj)
+                db.commit()
+                db.refresh(db_obj)
             else:
-                await db.flush()
+                db.flush()
         except IntegrityError as ex:
-            await db.rollback()
+            db.rollback()
             logger.exception(ex.orig.args)
             raise HTTPException(
                 detail=str(ex.orig),
@@ -310,41 +280,38 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         logger.info(f'{self.model.__name__} updated, data: {db_obj.__dict__}')
         return db_obj
 
-    async def remove(
-            self, db: AsyncSession, *, autocommit: bool = True, **kwargs
-    ) -> ModelType:
+    def remove(self, db: Session, *, id: str) -> ModelType:
         logger.debug(f"Deleting from {self.model.__name__}, id: '{id}'")
-        query = await self.filter_by(db=db, **kwargs)
-        query.is_deleted = True
-        await db.commit()
-        logger.info(f'{self.model.__name__} deleted, id: {id}')
-        return query
+        obj = db.query(self.model).with_deleted(db).get(id)
+        db.delete(obj)
+        db.commit()
+        return obj
 
-    async def hard_delete(
-            self, db: AsyncSession, *, id: int, autocommit: bool = True
+    def hard_delete(
+            self, db: Session, *, id: int, autocommit: bool = True
     ) -> ModelType:
         logger.debug(f"Deleting from {self.model.__name__}, id: '{id}'")
         query = delete(self.model).filter(getattr(self.model, "id") == id)
-        await db.execute(query)
-        await db.commit()
+        db.execute(query)
+        db.commit()
         logger.info(f'{self.model.__name__} deleted, id: {id}')
         return True
 
-    async def remove_multi(
-            self, db: AsyncSession, *, autocommit: bool = True, **kwargs
+    def remove_multi(
+            self, db: Session, *, autocommit: bool = True, **kwargs
     ) -> ModelType:
         logger.debug(f"Deleting from {self.model.__name__}, kwargs: {kwargs}")
         query = delete(self.model)
         for key, value in kwargs.items():
             if hasattr(self.model, key):
                 query = query.filter(getattr(self.model, key) == value)
-        # db.commit() if autocommit else db.flush()
-        await db.execute(query)
+        db.execute(query)
+        db.commit() if autocommit else db.flush()
         logger.info(f'{self.model.__name__} deleted')
         return True
 
-    async def count(self, db, **kwargs):
-        query = await self._active_data(select(func.count(self.model.id)))
+    def count(self, db, **kwargs):
+        query = self._active_data(select(func.count(self.model.id)))
         for key, value in kwargs.items():
             if hasattr(self.model, key):
                 if isinstance(value, list):
@@ -353,5 +320,5 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
                     query = query.filter(getattr(self.model, key) == value)
             if key == "inner_filter":
                 query = query.filter(*value)
-        count = (await db.execute(query)).unique().scalars().first()
+        count = (db.execute(query)).unique().scalars().first()
         return count
